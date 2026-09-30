@@ -12,6 +12,7 @@ import { convertMermaidToExcalidraw, DEFAULT_MERMAID_CONFIG } from './utils/merm
 import { cleanElementForExcalidraw, prepareServerScene, assertScenePreserved } from './utils/scene'
 import type { ServerElement } from './utils/scene'
 import type { MermaidConfig } from '@excalidraw/mermaid-to-excalidraw'
+import { createElementLink, getElementLinkTarget, findLinkTargetElements } from './utils/navigation'
 
 // Type definitions
 type ExcalidrawAPIRefValue = ExcalidrawImperativeAPI;
@@ -76,6 +77,7 @@ function App(): JSX.Element {
     excalidrawAPIRef.current = excalidrawAPI
   }, [excalidrawAPI])
   const [isConnected, setIsConnected] = useState<boolean>(false)
+  const [isPresenting, setIsPresenting] = useState(false)
   const websocketRef = useRef<WebSocket | null>(null)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -103,6 +105,43 @@ function App(): JSX.Element {
   const [sceneLoadStatus, setSceneLoadStatus] = useState<SceneLoadStatus>('loading')
   const sceneLoadStatusRef = useRef<SceneLoadStatus>('loading')
   const sceneGenerationRef = useRef(0)
+
+  const focusTarget = (id: string): boolean => {
+    const api = excalidrawAPIRef.current
+    if (!api || sceneLoadStatusRef.current !== 'ready') return false
+    const targets = findLinkTargetElements(api.getSceneElements(), id)
+    if (!targets.length) {
+      api.setToast({ message: 'The linked element or group no longer exists.', closable: true })
+      return false
+    }
+    api.scrollToContent(targets, {
+      fitToViewport: true,
+      viewportZoomFactor: 0.85,
+      animate: !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    })
+    return true
+  }
+
+  const showOverview = (): void => {
+    const api = excalidrawAPIRef.current
+    if (!api) return
+    api.scrollToContent(api.getSceneElements(), { fitToViewport: true, animate: true })
+  }
+
+  // Resolve deep links only after restoration, and handle browser Back/Forward
+  // without fetching or replacing the shared scene.
+  useEffect(() => {
+    if (!excalidrawAPI || sceneLoadStatus !== 'ready') return
+    const navigate = (): void => {
+      const id = getElementLinkTarget(window.location.href)
+      if (id) focusTarget(id)
+      else showOverview()
+    }
+    const initialTarget = getElementLinkTarget(window.location.href)
+    if (initialTarget) focusTarget(initialTarget)
+    window.addEventListener('popstate', navigate)
+    return () => window.removeEventListener('popstate', navigate)
+  }, [excalidrawAPI, sceneLoadStatus])
 
   const pauseSceneSync = (status: SceneLoadStatus = 'loading'): number => {
     sceneGenerationRef.current += 1
@@ -777,7 +816,24 @@ function App(): JSX.Element {
             </div>
           </div>
 
-          <button className="btn-secondary" onClick={clearCanvas} disabled={!isConnected || sceneLoadStatus !== 'ready'}>Clear Canvas</button>
+          <button className="btn-secondary" disabled={sceneLoadStatus !== 'ready'}
+            aria-pressed={isPresenting}
+            onClick={() => {
+              excalidrawAPI?.updateScene({
+                appState: { selectedElementIds: {}, selectedGroupIds: {} },
+                captureUpdate: CaptureUpdateAction.NEVER
+              })
+              setIsPresenting(value => !value)
+            }}>
+            {isPresenting ? 'Exit presentation' : 'Present'}
+          </button>
+          <button className="btn-secondary" disabled={sceneLoadStatus !== 'ready'} onClick={() => {
+            const url = new URL(window.location.href)
+            url.searchParams.delete('element')
+            window.history.pushState(null, '', url)
+            showOverview()
+          }}>Overview</button>
+          <button className="btn-secondary" onClick={clearCanvas} disabled={isPresenting || !isConnected || sceneLoadStatus !== 'ready'}>Clear Canvas</button>
         </div>
       </div>
 
@@ -804,7 +860,19 @@ function App(): JSX.Element {
           style={{ width: '100%', height: '100%' }}
         >
           <Excalidraw
-            viewModeEnabled={sceneLoadStatus !== 'ready'}
+            viewModeEnabled={isPresenting || sceneLoadStatus !== 'ready'}
+            generateLinkForSelection={createElementLink}
+            onLinkOpen={(element, event) => {
+              const id = element.link && getElementLinkTarget(element.link)
+              if (!id) return
+              event.preventDefault()
+              if (focusTarget(id)) {
+                const url = createElementLink(id)
+                if (getElementLinkTarget(window.location.href) !== id) {
+                  window.history.pushState(null, '', url)
+                }
+              }
+            }}
             excalidrawAPI={(api: ExcalidrawAPIRefValue) => setExcalidrawAPI(api)}
             onChange={(_elements, appState) => {
               if (appState?.theme && appState.theme !== theme) {
