@@ -20,7 +20,7 @@ import {
   exportImage,
   setViewport,
   saveSnapshot,
-  getSnapshot,
+  restoreSnapshot,
   sendMermaid,
   ApiResponse
 } from './canvas-client.js';
@@ -589,25 +589,12 @@ export async function callExcalidrawTool(
         const params = z.object({ name: z.string() }).parse(args);
         logger.info('Restoring snapshot via MCP', { name: params.name });
 
-        // Fetch the snapshot
-        let snapshot: { name: string; elements: ServerElement[]; createdAt: string };
-        try {
-          snapshot = await getSnapshot(params.name);
-        } catch {
-          throw new Error(`Snapshot "${params.name}" not found`);
-        }
-
-        // Clear current canvas, then restore elements
-        await clearCanvas();
-        const restored = await batchCreateElementsOnCanvas(snapshot.elements);
-        if (!restored) {
-          throw new Error(`Failed to restore snapshot "${params.name}": HTTP server unavailable (canvas was cleared)`);
-        }
+        const restored = await restoreSnapshot(params.name);
 
         return {
           content: [{
             type: 'text',
-            text: `Snapshot "${params.name}" restored (${snapshot.elements.length} elements)\n\n✅ Canvas updated`
+            text: `Snapshot "${params.name}" restored (${restored.count} elements)\n\n✅ Canvas updated`
           }]
         };
       }

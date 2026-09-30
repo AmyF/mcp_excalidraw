@@ -7,7 +7,7 @@ import {
   exportToSvg
 } from '@excalidraw/excalidraw'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
-import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
+import type { AppState, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import { convertMermaidToExcalidraw, DEFAULT_MERMAID_CONFIG } from './utils/mermaidConverter'
 import { cleanElementForExcalidraw, prepareServerScene, assertScenePreserved } from './utils/scene'
 import type { ServerElement } from './utils/scene'
@@ -16,7 +16,19 @@ import type { MermaidConfig } from '@excalidraw/mermaid-to-excalidraw'
 // Type definitions
 type ExcalidrawAPIRefValue = ExcalidrawImperativeAPI;
 
+type CanvasSettings = Pick<AppState, 'viewBackgroundColor' | 'gridSize' | 'gridStep' | 'gridModeEnabled'>;
+
+function canvasSettings(state: AppState): CanvasSettings {
+  return {
+    viewBackgroundColor: state.viewBackgroundColor,
+    gridSize: state.gridSize,
+    gridStep: state.gridStep,
+    gridModeEnabled: state.gridModeEnabled
+  }
+}
+
 interface WebSocketMessage {
+  appState?: Partial<CanvasSettings>;
   type: string;
   format?: 'png' | 'svg';
   background?: boolean;
@@ -39,6 +51,7 @@ interface WebSocketMessage {
 }
 
 interface ApiResponse {
+  appState?: Partial<CanvasSettings>;
   success: boolean;
   elements?: ServerElement[];
   element?: ServerElement;
@@ -78,6 +91,9 @@ function App(): JSX.Element {
   })
 
   // Sync state management
+  const clientIdRef = useRef(`${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const editVersionRef = useRef(0)
+  const observedSceneRef = useRef<string | null>(null)
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle')
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null)
   const autoSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -125,7 +141,8 @@ function App(): JSX.Element {
   const applyServerScene = (
     incoming: readonly Partial<ExcalidrawElement>[],
     generation: number,
-    files?: Record<string, unknown>
+    files?: Record<string, unknown>,
+    settings?: Partial<CanvasSettings>
   ): void => {
     const api = excalidrawAPIRef.current
     if (!api || generation !== sceneGenerationRef.current) return
@@ -134,8 +151,10 @@ function App(): JSX.Element {
     const prepared = prepareServerScene(incoming)
     const previous = api.getSceneElementsIncludingDeleted()
     try {
-      if (files) api.addFiles(Object.values(files) as Parameters<typeof api.addFiles>[0])
-      applySceneUpdateWithoutAutoSync(api, { elements: prepared, captureUpdate: CaptureUpdateAction.NEVER })
+      applySceneUpdateWithoutAutoSync(api, { elements: prepared, appState: settings ? { ...api.getAppState(), ...settings } : undefined, captureUpdate: CaptureUpdateAction.NEVER })
+      // addFiles builds its image cache from the current scene elements.
+      // Run it after updateScene so restored images are actually rendered.
+      api.addFiles(Object.values(files || api.getFiles()) as Parameters<typeof api.addFiles>[0])
       assertScenePreserved(prepared, api.getSceneElements())
     } catch (error) {
       applySceneUpdateWithoutAutoSync(api, { elements: previous, captureUpdate: CaptureUpdateAction.NEVER })
@@ -185,13 +204,7 @@ function App(): JSX.Element {
       if (!response.ok || !result.success || !Array.isArray(result.elements)) {
         throw new Error(result.error || 'Invalid scene response')
       }
-      const filesResponse = await fetch('/api/files', { signal: AbortSignal.timeout(10000) })
-      const filesResult = await filesResponse.json() as ApiResponse
-      if (generation !== sceneGenerationRef.current) return
-      if (!filesResponse.ok || !filesResult.files) {
-        throw new Error('Could not load scene files')
-      }
-      applyServerScene(result.elements.map(cleanElementForExcalidraw), generation, filesResult.files)
+      applyServerScene(result.elements.map(cleanElementForExcalidraw), generation, result.files, result.appState)
     } catch (error) {
       failSceneLoad(error, generation)
     }
@@ -232,6 +245,7 @@ function App(): JSX.Element {
     socket.onclose = (event: CloseEvent) => {
       if (websocketRef.current !== socket) return
       setIsConnected(false)
+      setSyncStatus('error')
       pauseSceneSync()
 
       // Reconnect after 3 seconds if not a clean close
@@ -244,6 +258,7 @@ function App(): JSX.Element {
       if (websocketRef.current !== socket) return
       console.error('WebSocket error:', error)
       setIsConnected(false)
+      setSyncStatus('error')
       pauseSceneSync()
     }
   }
@@ -286,11 +301,14 @@ function App(): JSX.Element {
       }
 
       switch (data.type) {
+        case 'scene_updated':
         case 'initial_elements':
           {
+            if (data.type === 'scene_updated' && sceneLoadStatusRef.current === 'failed') break
+            if (data.source === clientIdRef.current) break
             const generation = pauseSceneSync()
             if (!Array.isArray(data.elements)) throw new Error('Invalid initial scene')
-            applyServerScene(data.elements.map(cleanElementForExcalidraw), generation, (data as any).files)
+            applyServerScene(data.elements.map(cleanElementForExcalidraw), generation, (data as any).files, data.appState)
           }
           break
 
@@ -568,7 +586,7 @@ function App(): JSX.Element {
       }
     } catch (error) {
       console.error('Error processing WebSocket message:', error, data)
-      if (data.type === 'initial_elements' || data.type === 'canvas_cleared' || SCENE_MUTATIONS.has(data.type)) {
+      if (data.type === 'initial_elements' || data.type === 'scene_updated' || data.type === 'canvas_cleared' || SCENE_MUTATIONS.has(data.type)) {
         failSceneLoad(error)
       }
     }
@@ -616,9 +634,8 @@ function App(): JSX.Element {
     }
 
     syncInFlightRef.current = true
-    if (!silent) {
-      setSyncStatus('syncing')
-    }
+    const sentEditVersion = editVersionRef.current
+    setSyncStatus('syncing')
 
     try {
       // 1. Get current elements
@@ -631,47 +648,58 @@ function App(): JSX.Element {
       // 3. Convert to backend format
       const backendElements = activeElements.map(convertToBackendFormat)
 
+      const settings = api.getAppState()
       // 4. Send to backend
       const response = await fetch('/api/elements/sync', {
         method: 'POST',
+        signal: AbortSignal.timeout(15000),
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           elements: backendElements,
+          files: api.getFiles(),
+          appState: canvasSettings(settings),
+          source: clientIdRef.current,
           timestamp: new Date().toISOString()
         })
       })
 
-      if (response.ok) {
-        const result: ApiResponse = await response.json()
+      const result: ApiResponse = await response.json()
+      if (response.ok && result.success) {
         setLastSyncTime(new Date())
         console.log(`Sync successful: ${result.count} elements synced`)
 
-        if (!silent) {
-          setSyncStatus('success')
-          // Reset status after 2 seconds
-          setTimeout(() => setSyncStatus('idle'), 2000)
-        }
+        setSyncStatus(editVersionRef.current === sentEditVersion ? 'success' : 'idle')
       } else {
-        const error: ApiResponse = await response.json()
-        console.error('Sync failed:', error.error)
-        if (!silent) {
-          setSyncStatus('error')
-        }
+        console.error('Save failed:', result.error)
+        setSyncStatus('error')
       }
     } catch (error) {
       console.error('Sync error:', error)
-      if (!silent) {
-        setSyncStatus('error')
-      }
+      setSyncStatus('error')
     } finally {
       syncInFlightRef.current = false
+      if (editVersionRef.current !== sentEditVersion && canSyncScene()) {
+        if (autoSyncTimerRef.current) clearTimeout(autoSyncTimerRef.current)
+        autoSyncTimerRef.current = setTimeout(() => void syncToBackend({ silent: true }), AUTO_SYNC_DEBOUNCE_MS)
+      }
     }
   }
 
   const scheduleAutoSync = (): void => {
-    if (!canSyncScene() || !excalidrawAPI) {
+    const api = excalidrawAPIRef.current
+    if (!api) return
+    // Excalidraw calls onChange for selection, viewport and parent renders too.
+    // Only persisted content changes should schedule another save.
+    const observed = JSON.stringify({
+      elements: api.getSceneElements(),
+      files: api.getFiles(),
+      appState: canvasSettings(api.getAppState())
+    })
+    if (observed === observedSceneRef.current) return
+    observedSceneRef.current = observed
+    if (!canSyncScene()) {
       return
     }
     if (!userInteractedRef.current) {
@@ -680,6 +708,8 @@ function App(): JSX.Element {
     if (suppressAutoSyncCountRef.current > 0) {
       return
     }
+    editVersionRef.current += 1
+    setSyncStatus(status => status === 'error' ? 'error' : 'idle')
     if (autoSyncTimerRef.current) {
       clearTimeout(autoSyncTimerRef.current)
     }
@@ -734,14 +764,14 @@ function App(): JSX.Element {
             {/* Sync Status */}
             <div className="sync-status">
               {syncStatus === 'success' && (
-                <span className="sync-success">✅ Synced</span>
+                <span className="sync-success">✅ Saved</span>
               )}
               {syncStatus === 'error' && (
-                <span className="sync-error">❌ Sync Failed</span>
+                <span className="sync-error">❌ Save failed — changes are not saved</span>
               )}
               {lastSyncTime && syncStatus === 'idle' && (
                 <span className="sync-time">
-                  Last sync: {formatSyncTime(lastSyncTime)}
+                  Last saved: {formatSyncTime(lastSyncTime)}
                 </span>
               )}
             </div>

@@ -44,7 +44,8 @@ function resolveLogFilePath(): string {
   return ensureWritableLogFile(path.join(tmpdir(), 'excalidraw-mcp.log'));
 }
 
-const RESOLVED_LOG_FILE_PATH = resolveLogFilePath();
+const CONSOLE_ONLY = process.env.LOG_CONSOLE_ONLY === '1';
+const RESOLVED_LOG_FILE_PATH = CONSOLE_ONLY ? undefined : resolveLogFilePath();
 
 const logger: winston.Logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
@@ -63,14 +64,14 @@ const logger: winston.Logger = winston.createLogger({
 
   transports: [
     new winston.transports.Console({
-      level: 'warn',                 // only warn+error to stderr
-      stderrLevels: ['warn','error']
+      level: CONSOLE_ONLY ? (process.env.LOG_LEVEL || 'info') : 'warn',
+      stderrLevels: ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly']
     }),
 
-    new winston.transports.File({
+    ...(RESOLVED_LOG_FILE_PATH ? [new winston.transports.File({
       filename: RESOLVED_LOG_FILE_PATH,    // all levels to file
-      level: 'debug'
-    })
+      level: 'debug', maxsize: 10485760, maxFiles: 3
+    })] : [])
   ]
 });
 

@@ -4,9 +4,7 @@ import { ensureCanvasRunning } from '../../core/spawn.js';
 import {
   saveSnapshot,
   listSnapshots,
-  getSnapshot,
-  clearCanvas,
-  batchCreateElementsStrict
+  restoreSnapshot
 } from '../../core/canvas-client.js';
 
 export async function snapshot(argv: string[]): Promise<void> {
@@ -29,15 +27,8 @@ export async function snapshot(argv: string[]): Promise<void> {
     }
     case 'restore': {
       if (!name) throw new CliUsageError('Usage: snapshot restore <name>');
-      let snap;
-      try {
-        snap = await getSnapshot(name);
-      } catch {
-        throw new Error(`Snapshot "${name}" not found`);
-      }
-      await clearCanvas();
-      await batchCreateElementsStrict(snap.elements);
-      printJson({ success: true, name, restored: snap.elements.length });
+      const result = await restoreSnapshot(name);
+      printJson({ success: true, name, restored: result.count });
       return;
     }
     default:

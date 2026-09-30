@@ -30,6 +30,8 @@ import { z } from 'zod';
 import WebSocket from 'ws';
 import { isMainModule } from './core/entry.js';
 import { writePidFile, removePidFile } from './core/pidfile.js';
+import { initializePersistence, commitMutation, sceneState, setAppState, canvasAppState,
+  AppStateSchema, FileSchema, persistenceStatus } from './persistence.js';
 
 // Load environment variables
 dotenv.config();
@@ -85,13 +87,7 @@ wss.on('connection', (ws: WebSocket) => {
   logger.info('New WebSocket connection established');
 
   // Send current elements to new client
-  const filesObj: Record<string, ExcalidrawFile> = {};
-  files.forEach((f, id) => { filesObj[id] = f; });
-  const initialMessage: InitialElementsMessage & { files?: Record<string, ExcalidrawFile> } = {
-    type: 'initial_elements',
-    elements: Array.from(elements.values()),
-    ...(files.size > 0 ? { files: filesObj } : {})
-  };
+  const initialMessage = { type: 'initial_elements', ...sceneState() };
   ws.send(JSON.stringify(initialMessage));
 
   // Send sync status to new client
@@ -256,6 +252,8 @@ app.get('/api/elements', (req: Request, res: Response) => {
     res.json({
       success: true,
       elements: elementsArray,
+      files: Object.fromEntries(files),
+      appState: { ...canvasAppState },
       count: elementsArray.length
     });
   } catch (error) {
@@ -289,7 +287,7 @@ app.post('/api/elements', (req: Request, res: Response) => {
       resolveArrowBindings([element]);
     }
 
-    elements.set(id, element);
+    commitMutation(() => elements.set(id, element));
 
     // Broadcast to all connected clients
     const message: ElementCreatedMessage = {
@@ -365,7 +363,13 @@ app.put('/api/elements/:id', (req: Request, res: Response) => {
       }
     }
 
-    elements.set(id, updatedElement);
+    const movedArrows = commitMutation(() => {
+      elements.set(id, updatedElement);
+      const geometryChanged = ['x', 'y', 'width', 'height']
+        .some(key => Object.prototype.hasOwnProperty.call(body, key));
+      return geometryChanged && updatedElement.type !== 'arrow' && updatedElement.type !== 'line'
+        ? rerouteBoundArrows(id) : [];
+    });
 
     // Broadcast to all connected clients
     const message: ElementUpdatedMessage = {
@@ -374,13 +378,8 @@ app.put('/api/elements/:id', (req: Request, res: Response) => {
     };
     broadcast(message);
 
-    // Moving/resizing a shape must drag its bound arrows along
-    const geometryChanged = ['x', 'y', 'width', 'height']
-      .some(key => Object.prototype.hasOwnProperty.call(body, key));
-    if (geometryChanged && updatedElement.type !== 'arrow' && updatedElement.type !== 'line') {
-      for (const arrow of rerouteBoundArrows(id)) {
-        broadcast({ type: 'element_updated', element: arrow } as ElementUpdatedMessage);
-      }
+    for (const arrow of movedArrows) {
+      broadcast({ type: 'element_updated', element: arrow } as ElementUpdatedMessage);
     }
 
     res.json({
@@ -400,7 +399,7 @@ app.put('/api/elements/:id', (req: Request, res: Response) => {
 app.delete('/api/elements/clear', (req: Request, res: Response) => {
   try {
     const count = elements.size;
-    elements.clear();
+    commitMutation(() => { elements.clear(); files.clear(); }, 'clear');
 
     broadcast({
       type: 'canvas_cleared',
@@ -442,7 +441,7 @@ app.delete('/api/elements/:id', (req: Request, res: Response) => {
       });
     }
 
-    elements.delete(id);
+    commitMutation(() => elements.delete(id));
 
     // Broadcast to all connected clients
     const message: ElementDeletedMessage = {
@@ -716,7 +715,7 @@ app.post('/api/elements/batch', (req: Request, res: Response) => {
     resolveArrowBindings(createdElements);
 
     // Store all elements after binding resolution
-    createdElements.forEach(el => elements.set(el.id, el));
+    commitMutation(() => createdElements.forEach(el => elements.set(el.id, el)));
 
     // Broadcast to all connected clients
     const message: BatchCreatedMessage = {
@@ -780,87 +779,69 @@ app.post('/api/elements/from-mermaid', (req: Request, res: Response) => {
   }
 });
 
-// Sync elements from frontend (overwrite sync)
+// Full-scene operations keep elements, images and settings in one transaction.
+const SceneInputSchema = z.object({
+  elements: z.array(z.object({
+    id: z.string().min(1).optional(), type: z.string().min(1),
+    x: z.number().finite(), y: z.number().finite()
+  }).passthrough()),
+  files: z.record(FileSchema).optional(),
+  appState: AppStateSchema.optional(),
+  mode: z.enum(['replace', 'merge']).default('replace'),
+  source: z.string().optional()
+});
+
+function applyScene(input: z.infer<typeof SceneInputSchema>, backupReason?: string): void {
+  commitMutation(() => {
+    if (input.mode === 'replace') {
+      elements.clear();
+      if (input.files !== undefined) files.clear();
+    }
+    if (input.files) {
+      for (const [id, file] of Object.entries(input.files)) {
+        if (id !== file.id) throw new Error('Image file key must match its id');
+        files.set(id, file);
+      }
+    }
+    const incoming = input.elements.map(element => ({
+      ...element, id: element.id || generateId()
+    } as ServerElement));
+    for (const element of incoming) elements.set(element.id, element);
+    resolveArrowBindings(incoming);
+    if (input.appState) setAppState(input.mode === 'merge'
+      ? { ...canvasAppState, ...input.appState } : input.appState);
+  }, backupReason);
+  broadcast({ type: 'scene_updated', ...sceneState(), source: input.source });
+}
+
+app.get('/api/scene', (_req: Request, res: Response) => {
+  res.json({ success: true, ...sceneState() });
+});
+
+app.post('/api/scene', (req: Request, res: Response) => {
+  try {
+    const input = SceneInputSchema.parse(req.body);
+    applyScene(input, input.mode === 'replace' ? 'replace-import' : undefined);
+    res.json({ success: true, count: input.elements.length,
+      fileCount: Object.keys(input.files || {}).length, mode: input.mode });
+  } catch (error) {
+    res.status(error instanceof z.ZodError ? 400 : 500).json({ success: false, error: (error as Error).message });
+  }
+});
+
 app.post('/api/elements/sync', (req: Request, res: Response) => {
   try {
-    const { elements: frontendElements, timestamp } = req.body;
-
-    logger.info(`Sync request received: ${frontendElements.length} elements`, {
-      timestamp,
-      elementCount: frontendElements.length
-    });
-
-    // Validate input data
-    if (!Array.isArray(frontendElements)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Expected elements to be an array'
-      });
-    }
-
-    // Record element count before sync
+    const input = SceneInputSchema.parse({ ...req.body, mode: 'replace' });
     const beforeCount = elements.size;
-
-    // 1. Clear existing memory storage
-    elements.clear();
-    logger.info(`Cleared existing elements: ${beforeCount} elements removed`);
-
-    // 2. Batch write new data
-    let successCount = 0;
-    const processedElements: ServerElement[] = [];
-
-    frontendElements.forEach((element: any, index: number) => {
-      try {
-        // Ensure element has ID, generate one if missing
-        const elementId = element.id || generateId();
-
-        // Add server metadata
-        const processedElement: ServerElement = {
-          ...element,
-          id: elementId,
-          syncedAt: new Date().toISOString(),
-          source: 'frontend_sync',
-          syncTimestamp: timestamp,
-          version: 1
-        };
-
-        // Store to memory
-        elements.set(elementId, processedElement);
-        processedElements.push(processedElement);
-        successCount++;
-
-      } catch (elementError) {
-        logger.warn(`Failed to process element ${index}:`, elementError);
-      }
-    });
-
-    logger.info(`Sync completed: ${successCount}/${frontendElements.length} elements synced`);
-
-    // 3. Broadcast sync event to all WebSocket clients
-    broadcast({
-      type: 'elements_synced',
-      count: successCount,
-      timestamp: new Date().toISOString(),
-      source: 'manual_sync'
-    });
-
-    // 4. Return sync results
-    res.json({
-      success: true,
-      message: `Successfully synced ${successCount} elements`,
-      count: successCount,
-      syncedAt: new Date().toISOString(),
-      beforeCount,
-      afterCount: elements.size
-    });
-
+    // A browser load or Clear action replaces the whole scene. Archive it when
+    // existing IDs disappear, including imports performed through the UI.
+    const incomingIds = new Set(input.elements.map(element => element.id));
+    const removesElements = [...elements.keys()].some(id => !incomingIds.has(id));
+    applyScene(input, removesElements ? 'browser-replace' : undefined);
+    res.json({ success: true, count: input.elements.length, beforeCount,
+      afterCount: elements.size, syncedAt: new Date().toISOString() });
   } catch (error) {
-    logger.error('Sync error:', error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message,
-      details: 'Internal server error during sync operation'
-    });
+    res.status(error instanceof z.ZodError ? 400 : 500).json({ success: false, error: (error as Error).message });
   }
 });
 
@@ -874,26 +855,27 @@ app.get('/api/files', (_req: Request, res: Response) => {
 
 // POST add/update files (batch)
 app.post('/api/files', (req: Request, res: Response) => {
-  const body = req.body;
-  const fileList: ExcalidrawFile[] = Array.isArray(body) ? body : (body?.files || []);
-  for (const f of fileList) {
-    if (f.id && f.dataURL) {
-      files.set(f.id, { id: f.id, dataURL: f.dataURL, mimeType: f.mimeType || 'image/png', created: f.created || Date.now() });
-    }
+  try {
+    const fileList = z.array(FileSchema).parse(Array.isArray(req.body) ? req.body : req.body?.files);
+    commitMutation(() => {
+      for (const file of fileList) files.set(file.id, file);
+    });
+    broadcast({ type: 'files_added', files: fileList });
+    res.json({ success: true, count: fileList.length });
+  } catch (error) {
+    res.status(error instanceof z.ZodError ? 400 : 500).json({ success: false, error: (error as Error).message });
   }
-  // Broadcast files to connected clients
-  broadcast({ type: 'files_added', files: fileList });
-  res.json({ success: true, count: fileList.length });
 });
 
-// DELETE a file
 app.delete('/api/files/:id', (req: Request, res: Response) => {
-  const id = req.params.id as string;
-  if (files.delete(id)) {
+  try {
+    const id = req.params.id as string;
+    if (!files.has(id)) return res.status(404).json({ success: false, error: `File ${id} not found` });
+    commitMutation(() => files.delete(id));
     broadcast({ type: 'file_deleted', fileId: id });
     res.json({ success: true });
-  } else {
-    res.status(404).json({ success: false, error: `File with ID ${id} not found` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
   }
 });
 
@@ -949,7 +931,7 @@ app.post('/api/export/image', (req: Request, res: Response) => {
     broadcast({
       type: 'initial_elements',
       elements: Array.from(elements.values()),
-      ...(files.size > 0 ? { files: filesObj } : {})
+      files: filesObj, appState: { ...canvasAppState }
     } as InitialElementsMessage & { files?: Record<string, ExcalidrawFile> });
 
     // Give browsers time to process the reload before requesting export
@@ -1192,11 +1174,11 @@ app.post('/api/snapshots', (req: Request, res: Response) => {
 
     const snapshot: Snapshot = {
       name,
-      elements: Array.from(elements.values()),
+      ...structuredClone(sceneState()),
       createdAt: new Date().toISOString()
     };
 
-    snapshots.set(name, snapshot);
+    commitMutation(() => snapshots.set(name, snapshot));
     logger.info(`Snapshot saved: "${name}" with ${snapshot.elements.length} elements`);
 
     res.json({
@@ -1263,6 +1245,18 @@ app.get('/api/snapshots/:name', (req: Request, res: Response) => {
   }
 });
 
+app.post('/api/snapshots/:name/restore', (req: Request, res: Response) => {
+  try {
+    const snapshot = snapshots.get(req.params.name!);
+    if (!snapshot) return res.status(404).json({ success: false, error: 'Snapshot not found' });
+    const input = SceneInputSchema.parse({ ...structuredClone(snapshot), mode: 'replace' });
+    applyScene(input, 'restore-snapshot');
+    res.json({ success: true, count: snapshot.elements.length });
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
 // Serve the frontend
 app.get('/', (req: Request, res: Response) => {
   const htmlFile = path.join(__dirname, '../dist/frontend/index.html');
@@ -1276,8 +1270,10 @@ app.get('/', (req: Request, res: Response) => {
 
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
-  res.json({
-    status: 'healthy',
+  const storage = persistenceStatus();
+  res.status(storage.ready ? 200 : 503).json({
+    status: storage.ready ? 'healthy' : 'storage-error',
+    storage,
     timestamp: new Date().toISOString(),
     elements_count: elements.size,
     websocket_clients: clients.size,
@@ -1375,6 +1371,8 @@ async function startServer(): Promise<void> {
     }
   }
 
+  initializePersistence();
+
   // Only the process that actually wrote the pidfile may remove it —
   // a concurrent-start loser exiting on EADDRINUSE must not delete the
   // winner's pidfile.
@@ -1409,7 +1407,10 @@ async function startServer(): Promise<void> {
 // (`node dist/server.js`, `npm run canvas`, or spawned by the CLI/MCP
 // auto-start). Importing this module must never start the server.
 if (isMainModule(import.meta.url)) {
-  void startServer();
+  void startServer().catch(error => {
+    logger.error('Canvas recovery failed; existing data was preserved', { error: error.message });
+    process.exit(1);
+  });
 }
 
 export { startServer };

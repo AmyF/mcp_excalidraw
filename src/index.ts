@@ -38,6 +38,12 @@ async function runServer(): Promise<StdioServerHandle> {
       });
     }
 
+    // docker exec keeps a stdio process alive unless EOF is handled explicitly.
+    const shutdown = (): void => { process.exit(0); };
+    process.stdin.once('end', shutdown);
+    process.stdin.once('close', shutdown);
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
     process.stdin.resume();
 
     return handle;

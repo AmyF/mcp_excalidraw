@@ -1,12 +1,6 @@
 import fs from 'fs';
 import { generateId, ServerElement } from '../types.js';
-import {
-  getElements,
-  getFiles,
-  postFiles,
-  clearCanvas,
-  batchCreateElementsOnCanvas
-} from './canvas-client.js';
+import { getScene, applyScene } from './canvas-client.js';
 import { sanitizeFilePath } from './normalize.js';
 import { isObsidianExcalidrawMd, extractSceneJsonFromObsidianMd } from './obsidian-md.js';
 import { expandElementsForExport } from './expand-elements.js';
@@ -22,24 +16,16 @@ export interface ExportedScene {
 // fully on excalidraw.com and in the Obsidian Excalidraw plugin — with
 // deterministic ids/seeds so re-exporting an unchanged scene is byte-stable.
 export async function buildSceneFile(): Promise<ExportedScene> {
-  const sceneElements = await getElements();
-  const exportElements = expandElementsForExport(sceneElements, { deterministic: true });
-
-  // Fetch files for image elements
-  let sceneFiles: Record<string, any> = {};
-  try {
-    sceneFiles = await getFiles();
-  } catch { /* files endpoint may not exist */ }
+  const current = await getScene();
+  const exportElements = expandElementsForExport(current.elements, { deterministic: true });
+  const sceneFiles = current.files;
 
   const excalidrawScene: Record<string, any> = {
     type: 'excalidraw',
     version: 2,
     source: 'mcp-excalidraw-server',
     elements: exportElements,
-    appState: {
-      viewBackgroundColor: '#ffffff',
-      gridSize: null
-    },
+    appState: current.appState,
     ...(Object.keys(sceneFiles).length > 0 ? { files: sceneFiles } : {})
   };
 
@@ -73,48 +59,15 @@ export async function importScene(options: {
   }
   const sceneData: any = JSON.parse(raw);
 
-  // Extract elements from .excalidraw format or raw array
-  const importElements: ServerElement[] = Array.isArray(sceneData)
-    ? sceneData
-    : (sceneData.elements || []);
+  const importElements: ServerElement[] = Array.isArray(sceneData) ? sceneData : sceneData.elements;
+  if (!Array.isArray(importElements)) throw new Error('Scene must contain an elements array');
+  const elementsToCreate = importElements.map(element => ({ ...element, id: element.id || generateId() }));
+  const result = await applyScene({
+    elements: elementsToCreate,
+    files: Array.isArray(sceneData) ? {} : (sceneData.files || {}),
+    appState: Array.isArray(sceneData) ? {} : (sceneData.appState || {}),
+    mode: options.mode
+  });
+  return { count: result.count, fileCount: result.fileCount, mode: options.mode };
 
-  if (importElements.length === 0) {
-    throw new Error('No elements found in the import data');
-  }
-
-  // If replace mode, clear first
-  if (options.mode === 'replace') {
-    await clearCanvas();
-  }
-
-  // Batch create the imported elements
-  const elementsToCreate = importElements.map(el => ({
-    ...el,
-    id: el.id || generateId(),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    version: 1
-  }));
-
-  const created = await batchCreateElementsOnCanvas(elementsToCreate);
-  if (!created) {
-    // Especially important in replace mode: the canvas was already cleared,
-    // so a silently swallowed failure here would report success on data loss
-    throw new Error('Import failed: canvas rejected the batch create (elements were not restored)');
-  }
-
-  // Import files if present (for image elements)
-  let importedFileCount = 0;
-  const importFiles = sceneData.files;
-  if (importFiles && typeof importFiles === 'object') {
-    const fileList = Object.values(importFiles);
-    if (fileList.length > 0) {
-      try {
-        await postFiles(fileList);
-        importedFileCount = fileList.length;
-      } catch { /* best effort */ }
-    }
-  }
-
-  return { count: elementsToCreate.length, fileCount: importedFileCount, mode: options.mode };
 }

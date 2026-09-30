@@ -1,5 +1,6 @@
 import logger from '../utils/logger.js';
-import { ServerElement } from '../types.js';
+import { ServerElement, ExcalidrawFile, Snapshot } from '../types.js';
+import type { CanvasAppState } from '../persistence.js';
 import { EXPRESS_SERVER_URL, ENABLE_CANVAS_SYNC } from './config.js';
 
 // API Response types
@@ -84,8 +85,7 @@ export async function syncToCanvas(operation: string, data: any): Promise<SyncRe
 
   } catch (error) {
     logger.warn(`Canvas sync failed for ${operation}:`, (error as Error).message);
-    // Don't throw - we want MCP operations to work even if canvas is unavailable
-    return null;
+    throw error;
   }
 }
 
@@ -153,6 +153,28 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+export interface CanvasScene {
+  elements: ServerElement[];
+  files: Record<string, ExcalidrawFile>;
+  appState: CanvasAppState;
+}
+
+export async function getScene(): Promise<CanvasScene> {
+  return requestJson('/api/scene');
+}
+
+export async function applyScene(scene: Partial<CanvasScene> & { elements: ServerElement[]; mode: 'replace' | 'merge' }) {
+  return requestJson<{ success: boolean; count: number; fileCount: number }>('/api/scene', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scene)
+  });
+}
+
+export async function restoreSnapshot(name: string) {
+  return requestJson<{ success: boolean; count: number }>(`/api/snapshots/${encodeURIComponent(name)}/restore`, {
+    method: 'POST'
+  });
+}
+
 export async function getElements(): Promise<ServerElement[]> {
   const data = await requestJson<ApiResponse>('/api/elements');
   return data.elements || [];
@@ -208,8 +230,8 @@ export async function listSnapshots(): Promise<{ success: boolean; snapshots: an
   return requestJson('/api/snapshots');
 }
 
-export async function getSnapshot(name: string): Promise<{ name: string; elements: ServerElement[]; createdAt: string }> {
-  const data = await requestJson<{ success: boolean; snapshot: { name: string; elements: ServerElement[]; createdAt: string } }>(
+export async function getSnapshot(name: string): Promise<Snapshot> {
+  const data = await requestJson<{ success: boolean; snapshot: Snapshot }>(
     `/api/snapshots/${encodeURIComponent(name)}`
   );
   return data.snapshot;

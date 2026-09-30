@@ -174,6 +174,7 @@ export interface WebSocketMessage {
 }
 
 export type WebSocketMessageType =
+  | 'scene_updated'
   | 'initial_elements'
   | 'element_created'
   | 'element_updated'
@@ -281,6 +282,8 @@ export interface SetViewportMessage extends WebSocketMessage {
 export interface Snapshot {
   name: string;
   elements: ServerElement[];
+  files: Record<string, ExcalidrawFile>;
+  appState: import('./persistence.js').CanvasAppState;
   createdAt: string;
 }
 
