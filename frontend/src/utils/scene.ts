@@ -264,6 +264,9 @@ export const assertScenePreserved = (
     if ((element.frameId ?? null) !== (restored.frameId ?? null)) {
       throw new Error(`Scene restore changed frame membership for ${element.id}`)
     }
+    if ((element.link ?? null) !== (restored.link ?? null)) {
+      throw new Error(`Scene restore changed the link for ${element.id}`)
+    }
     if (element.frameId && !isFrame(actualById.get(element.frameId) || {})) {
       throw new Error(`Missing frame ${element.frameId} for ${element.id}`)
     }
@@ -308,7 +311,8 @@ export const prepareServerScene = (
   for (const element of converted) {
     if (!ids.has(element.id) && element.type === 'text' && element.containerId) {
       const siblings = generatedText.get(element.containerId) || []
-      siblings.push(element)
+      const parent = skeletons.find(item => item.id === element.containerId)
+      siblings.push({ ...element, frameId: parent?.frameId ?? null })
       generatedText.set(element.containerId, siblings)
     }
   }

@@ -1,11 +1,19 @@
 import type { Tool } from '@modelcontextprotocol/server';
 import { EXCALIDRAW_ELEMENT_TYPES } from '../types.js';
 
+// Shared scene relationship fields for single and batch edits. Internal links
+// use the same element query parameter as the Excalidraw editor.
+const sceneRelationshipProperties = {
+  frameId: { type: ['string', 'null'], description: 'ID of the frame containing this element; null removes membership.' },
+  name: { type: ['string', 'null'], description: 'Display name for a frame, such as Main Menu or Settings.' },
+  link: { type: ['string', 'null'], description: 'Element hyperlink. For navigation within this canvas use /?element=<URL-encoded target element or group ID>. Null removes the link.' }
+};
+
 // Tool definitions
 export const tools: Tool[] = [
   {
     name: 'create_element',
-    description: 'Create a new Excalidraw element. For arrows, use startElementId/endElementId to bind to shapes (auto-routes to edges).',
+    description: 'Create a new Excalidraw element. Use named frames with width/height for screens, frameId for screen membership, and link for navigation. For arrows, use startElementId/endElementId to bind to shapes (auto-routes to edges).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -16,6 +24,7 @@ export const tools: Tool[] = [
         },
         x: { type: 'number' },
         y: { type: 'number' },
+        ...sceneRelationshipProperties,
         width: { type: 'number' },
         height: { type: 'number' },
         backgroundColor: { type: 'string' },
@@ -48,6 +57,7 @@ export const tools: Tool[] = [
         },
         x: { type: 'number' },
         y: { type: 'number' },
+        ...sceneRelationshipProperties,
         width: { type: 'number' },
         height: { type: 'number' },
         backgroundColor: { type: 'string' },
@@ -257,6 +267,7 @@ export const tools: Tool[] = [
               },
               x: { type: 'number' },
               y: { type: 'number' },
+              ...sceneRelationshipProperties,
               width: { type: 'number' },
               height: { type: 'number' },
               backgroundColor: { type: 'string' },

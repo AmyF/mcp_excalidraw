@@ -69,6 +69,13 @@ export function prepareElement(elementData: ElementInput): ServerElement {
     version: 1
   } as ServerElement;
 
+  if (element.type === 'frame') {
+    if (!element.width || !element.height || element.width <= 0 || element.height <= 0) {
+      throw new Error('Frames require positive width and height');
+    }
+    element.name = element.name ?? null;
+  }
+
   // Normalize fontFamily from string names to numeric values
   if (element.fontFamily !== undefined) {
     element.fontFamily = normalizeFontFamily(element.fontFamily);

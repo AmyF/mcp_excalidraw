@@ -85,6 +85,13 @@ export interface ExcalidrawFreedrawElement extends ExcalidrawElementBase {
   lastCommittedPoint?: readonly [number, number] | null;
 }
 
+export interface ExcalidrawFrameElement extends ExcalidrawElementBase {
+  type: 'frame';
+  name: string | null;
+  width: number;
+  height: number;
+}
+
 export type ExcalidrawElement = 
   | ExcalidrawTextElement
   | ExcalidrawRectangleElement
@@ -92,7 +99,8 @@ export type ExcalidrawElement =
   | ExcalidrawDiamondElement
   | ExcalidrawArrowElement
   | ExcalidrawLineElement
-  | ExcalidrawFreedrawElement;
+  | ExcalidrawFreedrawElement
+  | ExcalidrawFrameElement;
 
 export interface ExcalidrawBoundElement {
   id: string;
@@ -106,7 +114,7 @@ export interface ExcalidrawBinding {
   fixedPoint?: readonly [number, number] | null;
 }
 
-export type ExcalidrawElementType = 'rectangle' | 'ellipse' | 'diamond' | 'arrow' | 'text' | 'line' | 'freedraw' | 'image';
+export type ExcalidrawElementType = 'rectangle' | 'ellipse' | 'diamond' | 'arrow' | 'text' | 'line' | 'freedraw' | 'image' | 'frame';
 
 // Excalidraw element types
 export const EXCALIDRAW_ELEMENT_TYPES: Record<string, ExcalidrawElementType> = {
@@ -117,13 +125,15 @@ export const EXCALIDRAW_ELEMENT_TYPES: Record<string, ExcalidrawElementType> = {
   TEXT: 'text',
   FREEDRAW: 'freedraw',
   LINE: 'line',
-  IMAGE: 'image'
+  IMAGE: 'image',
+  FRAME: 'frame'
 } as const;
 
 // Server-side element with metadata
 export interface ServerElement extends Omit<ExcalidrawElementBase, 'id'> {
   id: string;
   type: ExcalidrawElementType;
+  name?: string | null;
   createdAt?: string;
   updatedAt?: string;
   version?: number;

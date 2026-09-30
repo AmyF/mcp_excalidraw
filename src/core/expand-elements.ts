@@ -215,7 +215,7 @@ export function expandElementsForExport(
         roughness: 1,
         opacity: 100,
         groupIds: [],
-        frameId: null,
+        frameId: base.frameId ?? null,
         index: `a${indexCounter++}`,
         roundness: null,
         seed: seedFor(`${textId}:seed`),
